@@ -55,6 +55,10 @@ class Fungies_Payment_Gateway extends WC_Payment_Gateway {
 		Fungies_Return_Resolver::remember( $order_id );
 
 		$redirect_url = Fungies_Checkout_URL_Builder::build( $order );
+		if ( is_wp_error( $redirect_url ) ) {
+			wc_add_notice( $redirect_url->get_error_message(), 'error' );
+			return array( 'result' => 'failure' );
+		}
 
 		wc_get_logger()->info(
 			sprintf( '[Gateway] Redirecting order #%d to Fungies hosted checkout: %s', $order_id, $redirect_url ),

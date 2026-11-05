@@ -16,3 +16,4 @@ docs/ export-ignore
 .kb/ export-ignore
 .commit-msg.tmp export-ignore
 .release-notes.tmp export-ignore
+tests/ export-ignore
