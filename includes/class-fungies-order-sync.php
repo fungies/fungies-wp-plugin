@@ -110,7 +110,7 @@ class Fungies_Order_Sync {
 	private static function payment_verdict( $wc_order, $ev ) {
 		$currencies = array( $wc_order->get_currency() );
 		foreach ( $wc_order->get_items() as $item ) {
-			$currencies[] = get_post_meta( $item->get_product_id(), '_fungies_currency', true );
+			$currencies[] = Fungies_Currency::get_fungies_currency( $item->get_product_id() );
 		}
 
 		return Fungies_Checkout_Plan::payment_verdict(
@@ -131,13 +131,12 @@ class Fungies_Order_Sync {
 		}
 
 		$wc_order->update_meta_data( '_fungies_amount_check', $verdict['reason'] );
-		$wc_order->save();
 
 		$paid = null === $verdict['paid']
 			? __( 'no amount', 'fungies-for-woocommerce' )
 			: trim( number_format( $verdict['paid'], 2, '.', '' ) . ' ' . ( $ev['order']['currency'] ?? '' ) );
-		$wc_order->update_status(
-			'on-hold',
+		// A note of its own: update_status() drops the note when the order is already on hold.
+		$wc_order->add_order_note(
 			sprintf(
 				/* translators: 1: amount Fungies reported as paid, 2: WooCommerce order total, 3: check result code, 4: Fungies order ID */
 				__( 'Fungies reported a payment of %1$s against an order total of %2$s (%3$s, Fungies order %4$s). The order was NOT marked paid: review it in the Fungies dashboard before fulfilling.', 'fungies-for-woocommerce' ),
@@ -147,6 +146,7 @@ class Fungies_Order_Sync {
 				$fungies_order_id
 			)
 		);
+		$wc_order->update_status( 'on-hold' );
 
 		self::log( "Order #{$wc_order->get_id()} put on hold: payment check {$verdict['reason']}, paid {$paid}, total {$wc_order->get_total()}.", 'warning' );
 	}
