@@ -66,9 +66,11 @@ class Fungies_Order_Sync {
 			$wc_order = self::find_pending_order_by_email( $ev );
 		}
 
+		$created_from_webhook = false;
 		if ( ! $wc_order ) {
 			self::log( 'No existing WC order found — creating from webhook data.' );
-			$wc_order = self::create_order_from_webhook( $ev );
+			$wc_order             = self::create_order_from_webhook( $ev );
+			$created_from_webhook = (bool) $wc_order;
 		}
 
 		if ( ! $wc_order ) {
@@ -80,6 +82,15 @@ class Fungies_Order_Sync {
 		if ( in_array( $current_status, array( 'completed', 'processing' ), true ) ) {
 			self::log( "Order #{$wc_order->get_id()} already {$current_status} — skipping duplicate payment_success." );
 			return;
+		}
+
+		// An order created from this webhook took its total from the payment itself.
+		if ( ! $created_from_webhook ) {
+			$verdict = self::payment_verdict( $wc_order, $ev );
+			if ( ! $verdict['ok'] ) {
+				self::hold_for_review( $wc_order, $ev, $verdict, $fungies_order_id );
+				return;
+			}
 		}
 
 		$wc_order->payment_complete( $fungies_order_id );
@@ -94,6 +105,50 @@ class Fungies_Order_Sync {
 		self::store_order_meta( $wc_order, $ev );
 
 		self::log( "Order #{$wc_order->get_id()} marked completed via payment_success." );
+	}
+
+	private static function payment_verdict( $wc_order, $ev ) {
+		$currencies = array( $wc_order->get_currency() );
+		foreach ( $wc_order->get_items() as $item ) {
+			$currencies[] = Fungies_Currency::get_fungies_currency( $item->get_product_id() );
+		}
+
+		return Fungies_Checkout_Plan::payment_verdict(
+			(float) $wc_order->get_total(),
+			$ev['order']['value'] ?? null,
+			$ev['order']['currencyDecimals'] ?? null,
+			$ev['order']['currency'] ?? null,
+			$currencies
+		);
+	}
+
+	private static function hold_for_review( $wc_order, $ev, $verdict, $fungies_order_id ) {
+		self::store_order_meta( $wc_order, $ev );
+
+		if ( 'on-hold' === $wc_order->get_status() && $wc_order->get_meta( '_fungies_amount_check' ) === $verdict['reason'] ) {
+			self::log( "Order #{$wc_order->get_id()} already on hold ({$verdict['reason']}) — skipping duplicate payment_success." );
+			return;
+		}
+
+		$wc_order->update_meta_data( '_fungies_amount_check', $verdict['reason'] );
+
+		$paid = null === $verdict['paid']
+			? __( 'no amount', 'fungies-for-woocommerce' )
+			: trim( number_format( $verdict['paid'], 2, '.', '' ) . ' ' . ( $ev['order']['currency'] ?? '' ) );
+		// A note of its own: update_status() drops the note when the order is already on hold.
+		$wc_order->add_order_note(
+			sprintf(
+				/* translators: 1: amount Fungies reported as paid, 2: WooCommerce order total, 3: check result code, 4: Fungies order ID */
+				__( 'Fungies reported a payment of %1$s against an order total of %2$s (%3$s, Fungies order %4$s). The order was NOT marked paid: review it in the Fungies dashboard before fulfilling.', 'fungies-for-woocommerce' ),
+				$paid,
+				number_format( (float) $wc_order->get_total(), 2, '.', '' ) . ' ' . $wc_order->get_currency(),
+				$verdict['reason'],
+				$fungies_order_id
+			)
+		);
+		$wc_order->update_status( 'on-hold' );
+
+		self::log( "Order #{$wc_order->get_id()} put on hold: payment check {$verdict['reason']}, paid {$paid}, total {$wc_order->get_total()}.", 'warning' );
 	}
 
 	private static function handle_payment_failed( $payload ) {
