@@ -403,11 +403,11 @@ For each line item the builder resolves a Fungies offer ID by checking, in order
 1. `_fungies_offer_id` (product was pulled **from** Fungies)
 2. `_fungies_pushed_offer_id` (product was pushed **to** Fungies from WC)
 
-Each unit (quantity) becomes one entry in the resulting `$offer_ids[]` array. Items without either meta key are logged and skipped.
+Each offer ID is collected once, with quantities added up per offer (since 2.4.5; before, each unit was one more copy of the id). A Fungies checkout charges one `fngs-quantity` for every offer it holds, so when every offer has the same quantity N the URL carries `&fngs-quantity=N` (left out for N = 1), and when quantities differ (2× A + 1× B) `build()` returns a `WP_Error` and `process_payment()` refuses the order with a notice. Items without either meta key are logged and skipped.
 
 ### Step 2 — Build the URL
 
-#### Single offer (1 distinct offer ID, qty 1)
+#### Single offer (1 distinct offer ID, any quantity)
 
 No API call is needed — Fungies exposes a deterministic single-offer hosted checkout URL:
 
@@ -427,7 +427,7 @@ https://azzeki.com/checkout/d8ef9d66-7d5f-4c30-88d6-4ff8fd612b88
   &fngs-discount-code=percent10
 ```
 
-#### Multiple offers (2+, or qty > 1)
+#### Multiple offers (2+ distinct offer IDs)
 
 The builder calls the Fungies Checkout Element API to bundle all offers into a single hosted checkout session:
 

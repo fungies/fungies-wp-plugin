@@ -78,6 +78,13 @@ class Fungies_Checkout {
 			return;
 		}
 
+		if ( 'on-hold' === $status ) {
+			echo '<p class="woocommerce-info">';
+			esc_html_e( 'Your order is on hold while the store reviews your Fungies payment. You will hear from the store shortly.', 'fungies-for-woocommerce' );
+			echo '</p>';
+			return;
+		}
+
 		if ( 'failed' === $status ) {
 			echo '<p class="woocommerce-error">';
 			esc_html_e( 'Your Fungies payment could not be completed. Please try again or contact support.', 'fungies-for-woocommerce' );

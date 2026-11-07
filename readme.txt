@@ -6,7 +6,7 @@ Tested up to: 6.9
 Requires PHP: 7.4
 WC requires at least: 6.0
 WC tested up to: 9.0
-Stable tag: 2.4.4
+Stable tag: 2.4.5
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -129,17 +129,24 @@ For each cart line item, the builder resolves a Fungies offer ID by checking, in
 1. `_fungies_offer_id` (product was pulled **from** Fungies).
 2. `_fungies_pushed_offer_id` (product was pushed **to** Fungies from WooCommerce).
 
-Each unit (quantity) becomes one entry in the resulting offer-IDs array. Items without either meta key are logged and skipped.
+Each offer ID is collected once, with the cart quantity added up per offer. A Fungies checkout charges one quantity (`fngs-quantity`) for every offer it holds, so:
+
+* every offer has the same quantity N: the checkout opens at quantity N;
+* quantities differ (e.g. 2× A + 1× B): checkout is refused before the redirect with a message asking the customer to use one quantity per product or separate orders. The plugin never guesses a price.
+
+Items without either meta key are logged and skipped.
 
 = Step 2 — Build the URL =
 
-**Single offer** (1 distinct offer ID, quantity 1) — no API call is needed. The plugin redirects directly to:
+**Single offer** (1 distinct offer ID) — no API call is needed. The plugin redirects directly to:
 
-`<store_url>/checkout/<offer_id>?fngs-customer-email=...&fngs-customer-country=...`
+`<store_url>/checkout/<offer_id>?fngs-customer-email=...&fngs-customer-country=...&fngs-quantity=N`
 
-**Multiple offers** (2 or more, or quantity > 1) — the plugin calls `POST /v0/elements/checkout/create` with all collected offer IDs, then redirects to:
+**Multiple offers** (2 or more distinct offer IDs) — the plugin calls `POST /v0/elements/checkout/create` with each offer ID once, then redirects to:
 
-`<store_url>/checkout-element/<element_id>?fngs-customer-email=...&fngs-customer-country=...`
+`<store_url>/checkout-element/<element_id>?fngs-customer-email=...&fngs-customer-country=...&fngs-quantity=N`
+
+`fngs-quantity` is left out when N is 1.
 
 The element ID is also stored on the WooCommerce order as `_fungies_checkout_element_id` for traceability. When the customer lands on the hosted checkout, Fungies promotes the element into a checkout session and the URL becomes `…/checkout-element/<element_id>/checkout/<session_id>` — every cart product is visible in the order summary.
 
@@ -209,6 +216,10 @@ Yes. Production and staging environments in Fungies are completely separate. API
 
 Enable these events in your Fungies webhook configuration: `payment_success`, `payment_failed`, `payment_refunded`, `subscription_created`, `subscription_interval`, and `subscription_cancelled`.
 
+= What happens if the amount paid does not match the order? =
+
+On `payment_success` the plugin compares what Fungies charged with the order's items after discounts. The charge is `data.order.value` plus `data.order.tax` (the value is net of tax), in the order currency, so a paid order passes whether the offer's price includes tax or not. Shipping, fees and WooCommerce's own tax are added by WooCommerce and are not charged through Fungies. If the payment is short, in another currency, or carries no amount, the order is put **on hold** with an order note instead of being marked paid, and `_fungies_amount_check` records why. Review it in the Fungies dashboard before fulfilling.
+
 = What order metadata is stored? =
 
 When a payment succeeds, the plugin stores the Fungies order ID, order number, payment ID, payment type, subscription ID (if applicable), invoice URL, processing fee, and tax amount on the WooCommerce order.
@@ -228,6 +239,13 @@ Yes. The plugin is fully compatible with both the classic WooCommerce checkout a
 7. WooCommerce order detail view linked to its Fungies order and payment.
 
 == Changelog ==
+
+= 2.4.5 =
+* Fix: A cart with quantity > 1 now sends each Fungies offer ID once and passes the quantity as `fngs-quantity=N`, so 3× one product is charged for 3. Before, the plugin sent one offer ID per unit: the API answered 404 on the repeated ID, and once the API collapses repeated IDs the buyer would have been charged for 1.
+* Fix: A cart whose products have different quantities (e.g. 2× A + 1× B) is refused at checkout with a clear message, because a Fungies checkout charges one quantity for every product.
+* Safety: `payment_success` now checks the charge (`data.order.value` plus `data.order.tax`) and its currency against the order's items after discounts (shipping, fees and WooCommerce's own tax excluded). A shortfall, another currency or a missing amount puts the order on hold for review instead of marking it paid.
+* Fix: A renewal order's total, and a refund that carries no amount, now use the charge including tax. Before, both used the amount net of tax. A refund without an amount never exceeds what the order still holds.
+* Dev: `tests/test-checkout-plan.php` (plain PHP, no WordPress) covers both rules.
 
 = 2.4.4 =
 * Fix: Customer email was not pre-filled on the Fungies hosted checkout page when redirecting from WooCommerce. Root cause: `Fungies_Checkout_URL_Builder::build()` was sending `fngs-user-email` as the prefill query parameter, but per the official Fungies docs the prefill parameter is `fngs-customer-email`. `fngs-user-email` is the *outbound* system parameter Fungies appends to the post-purchase Instant Redirect URL — not the inbound prefill param. Mixing the two meant the WC billing email was passed but ignored by Fungies, so customers had to retype their email at checkout. The plugin now sends `fngs-customer-email` for prefill while still reading `fngs-user-email` from the return URL (where Fungies appends it) — both names are now used in their correct directions. No data migration needed; existing orders are unaffected.
@@ -286,6 +304,9 @@ Yes. The plugin is fully compatible with both the classic WooCommerce checkout a
 For changelog entries from earlier releases (2.1.x, 2.0.x, 1.x), see `changelog.txt` in the plugin root.
 
 == Upgrade Notice ==
+
+= 2.4.5 =
+Carts with quantity > 1 are charged for the full quantity; mixed-quantity carts are refused; a short payment puts the order on hold instead of marking it paid. Update before your Fungies store charges repeated offers once.
 
 = 2.4.4 =
 Fixes the customer email prefill on the Fungies hosted checkout page (was sending the wrong query parameter name). Recommended update.

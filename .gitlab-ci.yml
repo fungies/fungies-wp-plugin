@@ -1,0 +1,33 @@
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+variables:
+  GIT_DEPTH: "50"
+
+php-lint:
+  image: php:7.4-cli
+  script:
+    - find . -name '*.php' -not -path './.git/*' -print0 | xargs -0 -n1 php -l > /dev/null
+    - echo "php -l ok"
+
+php-tests:
+  image: php:7.4-cli
+  script:
+    - |
+      found=0
+      for t in tests/test-*.php; do
+        [ -e "$t" ] || continue
+        found=1
+        php "$t"
+      done
+      [ "$found" -eq 1 ] || echo "no tests yet"
+
+public-clean:
+  image: alpine:3.20
+  before_script:
+    - apk add --no-cache git
+  script:
+    - sh ci/test-public-clean.sh
+    - sh ci/check-public-clean.sh

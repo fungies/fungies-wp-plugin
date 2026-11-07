@@ -46,6 +46,10 @@ class Fungies_Order_Sync {
 		return round( (float) $cents / 100, 2 );
 	}
 
+	private static function charged_minor( $ev ) {
+		return Fungies_Checkout_Plan::charged_minor( $ev['order']['value'] ?? null, $ev['order']['tax'] ?? null );
+	}
+
 	private static function handle_payment_success( $payload ) {
 		$ev = self::extract_event_data( $payload );
 
@@ -66,9 +70,11 @@ class Fungies_Order_Sync {
 			$wc_order = self::find_pending_order_by_email( $ev );
 		}
 
+		$created_from_webhook = false;
 		if ( ! $wc_order ) {
 			self::log( 'No existing WC order found — creating from webhook data.' );
-			$wc_order = self::create_order_from_webhook( $ev );
+			$wc_order             = self::create_order_from_webhook( $ev );
+			$created_from_webhook = (bool) $wc_order;
 		}
 
 		if ( ! $wc_order ) {
@@ -80,6 +86,15 @@ class Fungies_Order_Sync {
 		if ( in_array( $current_status, array( 'completed', 'processing' ), true ) ) {
 			self::log( "Order #{$wc_order->get_id()} already {$current_status} — skipping duplicate payment_success." );
 			return;
+		}
+
+		// An order created from this webhook took its total from the payment itself.
+		if ( ! $created_from_webhook ) {
+			$verdict = self::payment_verdict( $wc_order, $ev );
+			if ( ! $verdict['ok'] ) {
+				self::hold_for_review( $wc_order, $ev, $verdict, $fungies_order_id );
+				return;
+			}
 		}
 
 		$wc_order->payment_complete( $fungies_order_id );
@@ -94,6 +109,59 @@ class Fungies_Order_Sync {
 		self::store_order_meta( $wc_order, $ev );
 
 		self::log( "Order #{$wc_order->get_id()} marked completed via payment_success." );
+	}
+
+	private static function payment_verdict( $wc_order, $ev ) {
+		$currencies = array( $wc_order->get_currency() );
+		foreach ( $wc_order->get_items() as $item ) {
+			$currencies[] = Fungies_Currency::get_fungies_currency( $item->get_product_id() );
+		}
+
+		return Fungies_Checkout_Plan::payment_verdict(
+			self::items_total( $wc_order ),
+			$ev['order']['value'] ?? null,
+			$ev['order']['currencyDecimals'] ?? null,
+			$ev['order']['currency'] ?? null,
+			$currencies,
+			$ev['order']['tax'] ?? null
+		);
+	}
+
+	private static function hold_for_review( $wc_order, $ev, $verdict, $fungies_order_id ) {
+		self::store_order_meta( $wc_order, $ev );
+
+		if ( 'on-hold' === $wc_order->get_status() && $wc_order->get_meta( '_fungies_amount_check' ) === $verdict['reason'] ) {
+			self::log( "Order #{$wc_order->get_id()} already on hold ({$verdict['reason']}) — skipping duplicate payment_success." );
+			return;
+		}
+
+		$wc_order->update_meta_data( '_fungies_amount_check', $verdict['reason'] );
+
+		$paid = null === $verdict['paid']
+			? __( 'no amount', 'fungies-for-woocommerce' )
+			: trim( number_format( $verdict['paid'], 2, '.', '' ) . ' ' . ( $ev['order']['currency'] ?? '' ) );
+		// A note of its own: update_status() drops the note when the order is already on hold.
+		$wc_order->add_order_note(
+			sprintf(
+				/* translators: 1: amount Fungies reported as paid, 2: WooCommerce order total, 3: check result code, 4: Fungies order ID */
+				__( 'Fungies reported a payment of %1$s against an order total of %2$s (%3$s, Fungies order %4$s). The order was NOT marked paid: review it in the Fungies dashboard before fulfilling.', 'fungies-for-woocommerce' ),
+				$paid,
+				number_format( self::items_total( $wc_order ), 2, '.', '' ) . ' ' . $wc_order->get_currency(),
+				$verdict['reason'],
+				$fungies_order_id
+			)
+		);
+		$wc_order->update_status( 'on-hold' );
+
+		self::log( "Order #{$wc_order->get_id()} put on hold: payment check {$verdict['reason']}, paid {$paid}, items " . self::items_total( $wc_order ) . '.', 'warning' );
+	}
+
+	/**
+	 * What Fungies can charge for this order: the items after discounts. Shipping, fees and
+	 * WooCommerce's own tax are added on the WooCommerce side and never reach the Fungies checkout.
+	 */
+	private static function items_total( $wc_order ) {
+		return Fungies_Checkout_Plan::items_total( $wc_order->get_subtotal(), $wc_order->get_discount_total() );
 	}
 
 	private static function handle_payment_failed( $payload ) {
@@ -118,15 +186,23 @@ class Fungies_Order_Sync {
 			return;
 		}
 
-		$refund_cents = $ev['payment']['refundAmount']
-			?? ( $ev['order']['value'] ?? 0 );
-		$refund_amount = self::cents_to_dollars( $refund_cents );
+		if ( isset( $ev['payment']['refundAmount'] ) ) {
+			$refund_amount = self::cents_to_dollars( $ev['payment']['refundAmount'] );
+		} else {
+			$refund_amount = Fungies_Checkout_Plan::full_refund_amount(
+				self::cents_to_dollars( self::charged_minor( $ev ) ),
+				$order->get_remaining_refund_amount()
+			);
+		}
 
-		wc_create_refund( array(
-			'amount'   => $refund_amount,
-			'reason'   => __( 'Refunded via Fungies.', 'fungies-for-woocommerce' ),
-			'order_id' => $order->get_id(),
-		) );
+		// A repeated full refund finds nothing left to refund: no empty refund line.
+		if ( $refund_amount > 0 ) {
+			wc_create_refund( array(
+				'amount'   => $refund_amount,
+				'reason'   => __( 'Refunded via Fungies.', 'fungies-for-woocommerce' ),
+				'order_id' => $order->get_id(),
+			) );
+		}
 
 		$order->update_status( 'refunded', __( 'Fungies payment refunded.', 'fungies-for-woocommerce' ) );
 		self::log( "Order #{$order->get_id()} refunded ({$refund_amount})." );
@@ -172,7 +248,7 @@ class Fungies_Order_Sync {
 			}
 		}
 
-		$total = self::cents_to_dollars( $ev['order']['value'] ?? 0 );
+		$total = self::cents_to_dollars( self::charged_minor( $ev ) );
 		if ( ! $total && $parent_order ) {
 			$total = $parent_order->get_total();
 		}

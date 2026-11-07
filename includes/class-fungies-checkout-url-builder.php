@@ -3,8 +3,16 @@ if ( ! defined( 'ABSPATH' ) ) exit;
 
 class Fungies_Checkout_URL_Builder {
 
+	/**
+	 * @return string|WP_Error The hosted checkout URL, or a WP_Error when the cart has
+	 *                         quantities a Fungies checkout cannot charge.
+	 */
 	public static function build( $order ) {
-		$checkout_url = self::resolve( $order );
+		$resolved = self::resolve( $order );
+		if ( is_wp_error( $resolved ) ) {
+			return $resolved;
+		}
+		$checkout_url = $resolved['url'];
 		if ( ! $checkout_url ) {
 			return $order->get_checkout_order_received_url();
 		}
@@ -19,6 +27,9 @@ class Fungies_Checkout_URL_Builder {
 			'fngs-customer-email'   => $order->get_billing_email(),
 			'fngs-customer-country' => $order->get_billing_country() ? $order->get_billing_country() : '',
 		);
+		if ( $resolved['quantity'] > 1 ) {
+			$args['fngs-quantity'] = $resolved['quantity'];
+		}
 		$discount_code = self::resolve_discount_code( $order );
 		if ( $discount_code ) {
 			$args['fngs-discount-code'] = $discount_code;
@@ -36,25 +47,36 @@ class Fungies_Checkout_URL_Builder {
 	}
 
 	private static function resolve( $order ) {
-		$offer_ids = self::collect_offer_ids( $order );
+		$plan = Fungies_Checkout_Plan::from_lines( self::collect_offer_lines( $order ) );
+
+		if ( isset( $plan['error'] ) ) {
+			self::log( sprintf( 'Order #%d refused: Fungies checkout needs one quantity for every offer, got %s.', $order->get_id(), wp_json_encode( $plan['quantities'] ) ), 'warning' );
+			return new WP_Error(
+				'fungies_mixed_quantities',
+				__( 'Fungies Checkout charges the same quantity for every product in one order. Please use the same quantity for each product, or buy them in separate orders.', 'fungies-for-woocommerce' )
+			);
+		}
+
+		$offer_ids = $plan['offers'];
+		$quantity  = $plan['quantity'];
 
 		if ( empty( $offer_ids ) ) {
 			$stored = self::find_stored_url( $order );
-			if ( $stored ) return $stored;
+			if ( $stored ) return array( 'url' => $stored, 'quantity' => 1 );
 			self::log( sprintf( 'Order #%d has no items mapped to Fungies offers.', $order->get_id() ), 'warning' );
-			return '';
+			return array( 'url' => '', 'quantity' => 1 );
 		}
 
 		if ( count( $offer_ids ) === 1 ) {
 			$store = self::store_url();
-			return $store ? $store . '/checkout/' . $offer_ids[0] : '';
+			return array( 'url' => $store ? $store . '/checkout/' . $offer_ids[0] : '', 'quantity' => $quantity );
 		}
 
-		return self::build_element_url( $order, $offer_ids );
+		return array( 'url' => self::build_element_url( $order, $offer_ids ), 'quantity' => $quantity );
 	}
 
-	private static function collect_offer_ids( $order ) {
-		$ids = array();
+	private static function collect_offer_lines( $order ) {
+		$lines = array();
 		foreach ( $order->get_items() as $item ) {
 			$pid      = $item->get_product_id();
 			$qty      = max( 1, (int) $item->get_quantity() );
@@ -66,9 +88,9 @@ class Fungies_Checkout_URL_Builder {
 				self::log( sprintf( 'Order #%d item "%s" (product %d) has no Fungies offer ID — skipping.', $order->get_id(), $item->get_name(), $pid ), 'warning' );
 				continue;
 			}
-			for ( $i = 0; $i < $qty; $i++ ) $ids[] = $offer_id;
+			$lines[] = array( $offer_id, $qty );
 		}
-		return $ids;
+		return $lines;
 	}
 
 	private static function find_stored_url( $order ) {
